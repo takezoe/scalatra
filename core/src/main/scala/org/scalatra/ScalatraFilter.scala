@@ -25,11 +25,9 @@ import scala.util.DynamicVariable
  *
  * @see ScalatraServlet
  */
-trait ScalatraFilter extends Filter with ServletBase {
+trait ScalatraFilter extends Filter with FilterBase {
 
   private[this] val _filterChain: DynamicVariable[FilterChain] = new DynamicVariable[FilterChain](null)
-
-  val RequestPathKey = "org.scalatra.ScalatraFilter.requestPath"
 
   protected def filterChain: FilterChain = _filterChain.value
 
@@ -41,6 +39,97 @@ trait ScalatraFilter extends Filter with ServletBase {
       handle(httpRequest, httpResponse)
     }
   }
+
+  protected var doNotFound: Action = () => { filterChain.doFilter(request, response) }
+
+  methodNotAllowed { _ => filterChain.doFilter(request, response) }
+
+  type ConfigT = FilterConfig
+
+  // see Initializable.initialize for why
+  def init(filterConfig: FilterConfig): Unit = {
+    initialize(filterConfig)
+  }
+
+  def destroy: Unit = {
+    shutdown()
+  }
+
+}
+
+/**
+ * This makes possible to process multiple Scalatra filters as a single Servlet filter.
+ *
+ * Each filters must extend PartialScalatraFilter and mount to this filter.
+ * Then all these partial filters are enabled by registering only this filter to the ServletContext.
+ */
+class CompositeScalatraFilter extends ScalatraFilter {
+
+  private[this] var _filters: Seq[PartialScalatraFilter] = Vector.empty
+
+  def mount(filter: PartialScalatraFilter): Unit = {
+    _filters :+= filter
+  }
+
+  doNotFound = () => { goNextFilter() }
+
+  methodNotAllowed { _ => goNextFilter() }
+
+  protected def goNextFilter(): Unit = {
+    _filters.reverse.foreach { filter =>
+      if (filter.process(request, response)) {
+        // TODO Don't use return!!
+        return
+      }
+    }
+    filterChain.doFilter(request, response)
+  }
+
+  override def init(filterConfig: FilterConfig): Unit = {
+    super.init(filterConfig)
+    _filters.foreach(_.init(filterConfig))
+  }
+
+  override def destroy: Unit = {
+    _filters.reverse.foreach(_.destroy())
+    super.destroy
+  }
+
+}
+
+/**
+ *
+ */
+trait PartialScalatraFilter extends FilterBase {
+
+  private[this] val _handled: DynamicVariable[Boolean] = new DynamicVariable[Boolean](true)
+
+  def init(filterConfig: FilterConfig): Unit = {
+  }
+
+  def process(request: HttpServletRequest, response: HttpServletResponse): Boolean = {
+    _handled.withValue(true) {
+      handle(request, response)
+      _handled.value
+    }
+  }
+
+  def destroy(): Unit = {
+    shutdown()
+  }
+
+  protected var doNotFound: Action = () => { _handled.value = false }
+
+  methodNotAllowed { _ => _handled.value = false }
+
+}
+
+/**
+ * FilterBase provides the common functionality for Scalatra filters.
+ */
+trait FilterBase extends ServletBase {
+
+  val RequestPathKey = "org.scalatra.ScalatraFilter.requestPath"
 
   // What goes in servletPath and what goes in pathInfo depends on how the underlying servlet is mapped.
   // Unlike the Scalatra servlet, we'll use both here by default.  Don't like it?  Override it.
@@ -74,21 +163,6 @@ trait ScalatraFilter extends Filter with ServletBase {
     if (servletContext == null)
       throw new IllegalStateException("routeBasePath requires an initialized servlet context to determine the context path")
     servletContext.getContextPath
-  }
-
-  protected var doNotFound: Action = () => filterChain.doFilter(request, response)
-
-  methodNotAllowed { _ => filterChain.doFilter(request, response) }
-
-  type ConfigT = FilterConfig
-
-  // see Initializable.initialize for why
-  def init(filterConfig: FilterConfig): Unit = {
-    initialize(filterConfig)
-  }
-
-  def destroy: Unit = {
-    shutdown()
   }
 
 }
